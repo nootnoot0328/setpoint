@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Setpoint</title>
+<meta name="description" content="Adaptive nutrition tracker that measures your energy expenditure from your weight trend and food log, then sets weekly calorie and macro targets.">
+<meta name="theme-color" content="#F2F2F4">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Setpoint">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@125,800&family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600;9..40,700&display=swap">
+<link rel="stylesheet" href="css/app.css">
+<script>
+  // apply the saved theme before first paint so there's no flash
+  try {
+    var s = JSON.parse(localStorage.getItem("setpoint.v2") || "{}");
+    var t = s.settings && s.settings.theme;
+    if (t === "light" || t === "dark") document.documentElement.setAttribute("data-theme", t);
+  } catch (e) {}
+</script>
+</head>
+<body>
+  <main id="app" aria-live="polite"></main>
+
+  <div class="dock" id="dock" hidden>
+    <div class="dock-inner">
+      <div class="searchpill" id="dockSearch" role="button" tabindex="0" aria-label="Search for a food">
+        <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.6-3.6"/></svg>
+        <span class="ph">Search for a food</span>
+        <button class="scan" id="dockScan" aria-label="Scan a barcode"><svg viewBox="0 0 24 24"><path d="M4 8V6a2 2 0 012-2h2M16 4h2a2 2 0 012 2v2M20 16v2a2 2 0 01-2 2h-2M8 20H6a2 2 0 01-2-2v-2M8 8.5v7M11 8.5v7M14 8.5v7M17 8.5v7"/></svg></button>
+      </div>
+      <button class="icon-btn fabdock" id="dockPlus" aria-label="Add"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button>
+    </div>
+  </div>
+
+  <nav class="nav" aria-label="Main"><div class="nav-inner" id="navInner"></div></nav>
+  <div id="layer"></div>
+
+  <script src="js/engine.js"></script>
+  <script src="js/foods.js"></script>
+  <script src="js/charts.js"></script>
+  <script src="js/exercises.js"></script>
+  <script src="js/train.js"></script>
+  <script src="js/app.js"></script>
+  <script>
+    if ("serviceWorker" in navigator && location.protocol === "https:") {
+      window.addEventListener("load", function () {
+        navigator.serviceWorker.register("sw.js").catch(function () {});
+      });
+    }
+  </script>
+</body>
+</html>
