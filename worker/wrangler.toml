@@ -1,0 +1,14 @@
+# Setpoint sync Worker. Deploy with:  npx wrangler deploy
+# Full walkthrough in worker/README.md
+name = "setpoint-sync"
+main = "worker.js"
+compatibility_date = "2026-09-01"
+
+[[kv_namespaces]]
+binding = "SP"
+id = "PASTE_YOUR_KV_NAMESPACE_ID_HERE"
+
+[vars]
+# Only pages from this address may call the Worker from a browser.
+# Change it to your GitHub Pages address (no trailing slash).
+ALLOWED_ORIGINS = "https://nootnoot0328.github.io"

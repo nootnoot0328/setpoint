@@ -237,4 +237,93 @@ test("weekly sets are grouped by muscle", () => {
   assert.strictEqual(w.Chest, 2); assert.strictEqual(w.Back, 3);
 });
 
+/* ------------------------------------------------------- freestyle */
+const ALL = require("../js/exlib-full.js");
+
+test("full library is large and every entry has an equipment name", () => {
+  const xs = Object.values(ALL);
+  assert.ok(xs.length > 600, String(xs.length));
+  assert.ok(xs.every(x => x.eqn && x.mus));
+});
+
+test("picker respects equipment and hits the tapped muscle", () => {
+  const p = E.pickForMuscles(ALL, ["chest"], ["Bodyweight"], "beginner", { seed: 7 });
+  assert.ok(p.length >= 2, "picked " + p.length);
+  p.forEach(({ ex }) => { assert.strictEqual(ALL[ex].eqn, "Bodyweight"); assert.ok(ALL[ex].mus.includes("chest")); });
+});
+
+test("picker splits across several muscles and never repeats", () => {
+  const p = E.pickForMuscles(ALL, ["chest", "lats", "quads"], ["Dumbbell", "Bodyweight", "Pull-up bar"], "intermediate", { seed: 3 });
+  assert.strictEqual(new Set(p.map(x => x.ex)).size, p.length);
+  assert.deepStrictEqual([...new Set(p.map(x => x.region))], ["chest", "lats", "quads"]);
+});
+
+test("shuffle seed changes the pick but not the rules", () => {
+  const a = E.pickForMuscles(ALL, ["shoulders"], ["Dumbbell", "Cable", "Machine", "Barbell"], "intermediate", { seed: 1 }).map(x => x.ex);
+  const b = E.pickForMuscles(ALL, ["shoulders"], ["Dumbbell", "Cable", "Machine", "Barbell"], "intermediate", { seed: 99 }).map(x => x.ex);
+  assert.notDeepStrictEqual(a, b);
+});
+
+test("beginners don't get expert moves", () => {
+  const p = E.pickForMuscles(ALL, ["abs", "lats"], ["Bodyweight", "Pull-up bar"], "beginner", { seed: 5 });
+  assert.ok(p.every(({ ex }) => ALL[ex].lvl !== "expert"), p.map(x => ALL[x.ex].lvl).join(","));
+});
+
+test("muscle sets count secondaries as half", () => {
+  const S = blank(); S.train = { log: [{ type: "lift", date: E.today(), ex: [
+    { ex: "x", mus: ["chest"], sec: ["triceps", "shoulders"], sets: [{ done: true }, { done: true }, { done: true }] }] }] };
+  const m = E.muscleSets(S, E.addDays(E.today(), -6), E.today());
+  assert.strictEqual(m.chest, 3); assert.strictEqual(m.triceps, 1.5); assert.strictEqual(m.shoulders, 1.5);
+});
+
+test("recovery: hard chest day yesterday → chest recovering, legs ready, clears within 72 h", () => {
+  const now = Date.UTC(2026, 8, 25, 10);
+  const S = blank(); S.train = { log: [{ type: "lift", date: "2026-09-24", at: now - 16 * 36e5, ex: [
+    { ex: "a", mus: ["chest"], sec: ["triceps"], sets: Array.from({ length: 7 }, () => ({ done: true, rir: 1 })) }] }] };
+  const r = E.recovery(S, now);
+  assert.strictEqual(r.chest.status, "recovering");
+  assert.strictEqual(r.quads.status, "ready");
+  assert.ok(r.chest.hoursLeft > 24 && r.chest.hoursLeft < 72 - 16, "chest hours " + r.chest.hoursLeft);
+  assert.ok(r.triceps.fatigue < r.chest.fatigue);
+  assert.strictEqual(E.recovery(S, now + 60 * 36e5).chest.status, "ready");
+});
+
+test("recovery: easy sets (4+ in reserve) load less than sets to failure", () => {
+  const now = Date.UTC(2026, 8, 25, 10), mk = rir => ({ train: { log: [{ type: "lift", date: "2026-09-25", at: now - 36e5, ex: [
+    { ex: "a", mus: ["quadriceps"], sets: Array.from({ length: 4 }, () => ({ done: true, rir })) }] }] } });
+  assert.ok(E.recovery(mk(4), now).quads.fatigue < E.recovery(mk(0), now).quads.fatigue);
+});
+
+test("suggestions never include a recovering muscle", () => {
+  const now = Date.UTC(2026, 8, 25, 10);
+  const S = blank(); S.train = { log: [{ type: "lift", date: "2026-09-25", at: now - 2 * 36e5, ex: [
+    { ex: "a", mus: ["quadriceps"], sec: ["glutes", "hamstrings"], sets: Array.from({ length: 8 }, () => ({ done: true, rir: 1 })) }] }] };
+  const rec = E.recovery(S, now), sug = E.suggestRegions(S, now);
+  assert.ok(sug.length >= 2);
+  assert.ok(sug.every(r => rec[r].status === "ready"), sug.join(","));
+});
+
+test("freestyle picks steer away from tired secondary muscles", () => {
+  const fat = { triceps: { fatigue: 1.2 } };
+  const eqs = ["Dumbbell", "Barbell", "Cable", "Machine", "Bodyweight"];
+  const count = f => { let n = 0; for (let seed = 1; seed <= 30; seed++) E.pickForMuscles(ALL, ["chest"], eqs, "intermediate", { seed, fatigue: f })
+    .forEach(({ ex }) => { if ((ALL[ex].sec || []).includes("triceps")) n++; }); return n; };
+  assert.ok(count(fat) < count(null), `${count(fat)} vs ${count(null)}`);
+});
+
+test("AI estimate paste: fenced block with units, ranges and a total", () => {
+  const txt = "```\nSETPOINT\nitem | portion | kcal | protein | fat | carbs\n| **Roast chicken rice** | 1 plate ~350 g | 600-640 kcal | 30g | 21 g | 75 |\nKopi C | 1 cup | 90 | 1 | 2 | 16\nTOTAL | | 710 | 31 | 23 | 91\nCONFIDENCE | medium | ±25%\nNOTES | Assumed skin on.\n```";
+  const r = E.parseAiEstimate(txt);
+  assert.strictEqual(r.items.length, 2);
+  assert.deepStrictEqual(r.items[0], { name: "Roast chicken rice", portion: "1 plate ~350 g", kcal: 620, p: 30, f: 21, c: 75, mismatch: false });
+  assert.strictEqual(r.total.kcal, 710); assert.strictEqual(r.confidence, "medium"); assert.strictEqual(r.notes, "Assumed skin on.");
+});
+
+test("AI estimate paste: flags macros that don't add up, ignores junk", () => {
+  const r = E.parseAiEstimate("hello\nitem | portion | kcal | protein | fat | carbs\n---|---|---|---|---|---\nMee goreng | 1 plate | 300 | 15 | 30 | 80\nnot a row");
+  assert.strictEqual(r.items.length, 1);
+  assert.strictEqual(r.items[0].mismatch, true);
+  assert.strictEqual(E.parseAiEstimate("").items.length, 0);
+});
+
 console.log(`\n${pass} passed`);

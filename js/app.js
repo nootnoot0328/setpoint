@@ -5,7 +5,7 @@
    ========================================================================== */
 (function () {
   "use strict";
-  const E = window.Engine, C = window.Charts, FOODS = window.SP_FOODS;
+  const E = window.Engine, C = window.Charts, FOODS = window.SP_FOODS, Y = window.SPSync;
   const { r0, r1, clamp, addDays, daysBetween, isWeekend, weekStart, today } = E;
   let TR = null;   // training module, initialised in boot()
 
@@ -41,6 +41,9 @@
     more: '<circle cx="12" cy="12" r="9.5"/><path d="M8 12h.01M12 12h.01M16 12h.01" stroke-width="3"/>',
     train: '<path d="M6.5 6.5v11M17.5 6.5v11M3.5 9v6M20.5 9v6M6.5 12h11"/>',
     share: '<path d="M12 3v12M7.5 7.5L12 3l4.5 4.5M5 12v7a2 2 0 002 2h10a2 2 0 002-2v-7"/>',
+    spark: '<path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"/><path d="M19 15l.7 2 2 .7-2 .7-.7 2-.7-2-2-.7 2-.7z"/>',
+    sync: '<path d="M20 12a8 8 0 01-14.3 4.9M4 12A8 8 0 0118.3 7.1"/><path d="M18.5 3v4.2h-4.2M5.5 21v-4.2h4.2"/>',
+    body: '<circle cx="12" cy="4.5" r="2.2"/><path d="M5 8.5h14M12 8.5v6M12 14.5l-3 7M12 14.5l3 7"/>',
     search: '<circle cx="11" cy="11" r="7"/><path d="M20 20l-3.6-3.6"/>',
     barcode: '<path d="M4 8V6a2 2 0 012-2h2M16 4h2a2 2 0 012 2v2M20 16v2a2 2 0 01-2 2h-2M8 20H6a2 2 0 01-2-2v-2M8 8.5v7M11 8.5v7M14 8.5v7M17 8.5v7"/>',
     bolt: '<path d="M13 2.5L4.5 13.5h7l-1 8 8.5-11h-7l1-8z"/>',
@@ -120,22 +123,29 @@
       goal: { mode: "loss", ratePct: 0.6, goalWeight: null, startWeight: null, startDate: null, proteinMode: "lbm", proteinPerKg: 2.2, fatPerKg: 0.8, weekendPct: 0 },
       settings: { kcalPerKg: 7700, alpha: 0.25, theme: "system", dash: "remaining", demo: false, lastExport: null,
         estimator: "kalman", rho: "auto", backupDays: 7, voice: true, sound: true },
-      weights: {}, intake: {}, fasted: {}, custom: [], meals: [], program: { checkins: [] },
+      weights: {}, intake: {}, fasted: {}, custom: [], meals: [], health: {}, meta: { u: {}, tomb: {} }, program: { checkins: [] },
       train: { profile: null, plan: null, log: [], active: null }
     };
   }
   let S = blank();
   let CACHE = {};
   function invalidate() { CACHE = {}; }
-  function save() {
+  let SNAP = null;          // record hashes as of the last save, for change tracking
+  function persist() {
     invalidate();
     try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) { /* storage blocked: keep going in memory */ }
+  }
+  function save() {
+    SNAP = Y.stamp(S, SNAP);
+    persist();
+    scheduleSync();
   }
   function merge(p) {
     const b = blank();
     return Object.assign(b, p, {
       profile: Object.assign(b.profile, p.profile), goal: Object.assign(b.goal, p.goal),
       settings: Object.assign(b.settings, p.settings), fasted: p.fasted || {}, custom: p.custom || [], meals: p.meals || [],
+      health: p.health || {}, meta: p.meta && p.meta.u ? p.meta : { u: {}, tomb: {} },
       program: p.program && p.program.checkins ? p.program : { checkins: [] },
       train: Object.assign(b.train, p.train || {})
     });
@@ -162,7 +172,7 @@
   function load() {
     try {
       const raw = localStorage.getItem(KEY);
-      if (raw) { const p = JSON.parse(raw); if (p && p.v === 2) { S = merge(p); return true; } }
+      if (raw) { const p = JSON.parse(raw); if (p && p.v === 2) { S = merge(p); SNAP = Y.hashes(S); return true; } }
       const old = localStorage.getItem(OLD_KEY);
       if (old) {
         const p = JSON.parse(old);
@@ -448,6 +458,18 @@
         C.spark({ w: tw, h: 58, xs: bfk, series: [{ type: "dots", data: bfk.map(k => S.weights[k].bf), color: "var(--bfc)", opacity: 1, r: 3.4 }] }),
         lastBf != null ? num(lastBf, 1) : "—", "%", () => push({ v: "detail", kind: "bf" }))
     ));
+
+    // Apple Health + sync
+    const hs = days7.map(d => (S.health[d] || {}).steps ?? null);
+    if (hs.some(v => v != null) || SC.enabled) {
+      const lastSteps = [...hs].reverse().find(v => v != null);
+      root.append(h("div", { class: "tiles", style: { marginTop: "12px" } },
+        tile("Steps", "From Apple Health", C.spark({ w: tw, h: 58, xs: days7, zero: 0, series: [{ type: "bars", data: hs, colorFn: () => "var(--carb)" }] }),
+          lastSteps != null ? num(lastSteps) : "—", "steps", () => push({ v: "sync" })),
+        h("button", { class: "tile", onclick: () => push({ v: "sync" }) }, h("h3", null, "Sync"), h("div", { class: "sub" }, "Encrypted"),
+          h("div", { class: "spk", html: `<div class="syncbig" data-state="${!SC.enabled ? "off" : SC.lastErr ? "err" : "ok"}">${svg(I.sync)}</div>` }),
+          h("div", { class: "foot" }, h("span", { "data-syncstatus": "", style: { color: "var(--text)", fontSize: "14.5px", whiteSpace: "normal" } }, syncLabel())))));
+    }
 
     // nutrition today
     root.append(section("Nutrition", "See All", () => push({ v: "detail", kind: "kcal" })));
@@ -759,6 +781,8 @@
     root.append(h("div", { style: { height: "14px" } }));
     root.append(h("div", { class: "list" },
       row("fork", "My foods", `${S.custom.length} saved`, () => push({ v: "foods" })),
+      h("button", { class: "row", onclick: () => push({ v: "sync" }) }, h("span", { class: "ri", html: svg(I.sync) }),
+        h("span", { class: "rt" }, h("b", null, "Sync & Apple Health"), h("span", { "data-syncstatus": "" }, syncLabel())), h("span", { html: svg(I.chev, "chev") })),
       row("share", "Back up now", S.settings.lastExport ? `Last backup ${dShort(S.settings.lastExport)}` : "Not backed up yet", () => shareBackup()),
       row("data", "Your data", "Export, import, reminders", () => push({ v: "data" })),
       row("book", "How it works", "The method and its sources", () => push({ v: "method" }))));
@@ -915,7 +939,8 @@
     const ks = Object.keys(S.weights).sort().reverse().slice(0, 30);
     root.append(h("div", { class: "card" }, ks.length ? ks.map(k => h("div", { class: "hist" },
       h("div", { class: "d" }, dLong(k)),
-      h("div", { class: "w" }, `${f1(S.weights[k].kg)} kg`, S.weights[k].bf != null ? h("span", { class: "muted", style: { fontSize: "15px", fontWeight: 400, marginLeft: "8px" } }, `${f1(S.weights[k].bf)}%`) : null),
+      h("div", { class: "w" }, `${f1(S.weights[k].kg)} kg`, S.weights[k].bf != null ? h("span", { class: "muted", style: { fontSize: "15px", fontWeight: 400, marginLeft: "8px" } }, `${f1(S.weights[k].bf)}%`) : null,
+        S.weights[k].src === "health" ? h("span", { class: "src", style: { marginLeft: "8px" } }, "Health") : null),
       h("div", { class: "r" }, h("button", { class: "btn sm", onclick: () => weighSheet(k) }, "Edit")))) : h("div", { class: "empty-state" }, "No weigh-ins yet.")));
     return root;
   }
@@ -1160,7 +1185,8 @@
     return root;
   }
 
-  const SCREENS = { detail: viewDetail, body: viewBody, calendar: viewCalendar, profile: viewProfile, program: viewProgram, foods: viewFoods, data: viewData, method: viewMethod };
+  const SCREENS = { detail: viewDetail, body: viewBody, calendar: viewCalendar, profile: viewProfile, program: viewProgram, foods: viewFoods, data: viewData, method: viewMethod,
+    sync: (...a) => viewSync(...a), shortcut: (...a) => viewShortcut(...a) };
   // training screens are added at boot, once the module is initialised
 
   /* =================================================================
@@ -1204,9 +1230,11 @@
     openMenu([
       ["search", "Log food", () => logSheet({})],
       ["barcode", "Scan barcode", () => logSheet({ tab: "scan" })],
+      ["spark", "AI photo estimate", () => logSheet({ tab: "ai" })],
       ["bolt", "Quick add calories", () => logSheet({ tab: "quick" })],
       ["scale", "Log weigh-in", () => weighSheet()],
       ["train", S.train && S.train.active ? "Resume workout" : "Start next workout", () => TR.startNext()],
+      S.train && S.train.active ? null : ["body", "Freestyle from body map", () => { go("train"); setTimeout(() => TR.openFreestyle(), 50); }],
       S.intake[addDays(SEL, -1)] ? ["copy", `Copy ${SEL === t0 ? "yesterday" : dShort(addDays(SEL, -1))} to ${SEL === t0 ? "today" : dShort(SEL)}`, () => copyDay(addDays(SEL, -1), SEL)] : null
     ]);
   }
@@ -1266,7 +1294,7 @@
               Array.from({ length: 24 }, (_, i) => h("option", { value: i, selected: i === st.hour ? true : null }, hourLabel(i))))),
           h("div", { class: "chip outline", style: { marginLeft: "auto" } }, h("span", { html: flame() }), `${f0(tot.kcal)} / ${tg ? f0(tg.kcal) : "—"}`));
       };
-      const TABS = [["search", "Search", "search"], ["meals", "Meals", "fork"], ["scan", "Scan", "barcode"], ["quick", "Quick Add", "bolt"], ["recent", "Recent", "clock"], ["mine", "My Foods", "list"]];
+      const TABS = [["search", "Search", "search"], ["meals", "Meals", "fork"], ["scan", "Scan", "barcode"], ["ai", "AI Photo", "spark"], ["quick", "Quick Add", "bolt"], ["recent", "Recent", "clock"], ["mine", "My Foods", "list"]];
       const paintTabs = () => {
         tabs.innerHTML = "";
         TABS.forEach(([id, label, ic]) => tabs.append(h("button", { class: st.tab === id ? "on" : null, role: "tab", html: svg(I[ic]) + label,
@@ -1350,6 +1378,45 @@
           body.append(h("button", { class: "btn block", style: { marginBottom: "10px" }, html: svg(I.plus) + "New food", onclick: () => foodForm(null, f => portion(f)) }));
           if (!S.custom.length) body.append(h("div", { class: "empty-state" }, "Your saved and scanned foods appear here."));
           S.custom.forEach(f => body.append(resRow(f)));
+        } else if (st.tab === "ai") {
+          foot.hidden = true;
+          st.ai = st.ai || { text: "", off: new Set() };
+          const out = h("div");
+          const ta = h("textarea", { class: "inp aipaste", rows: 5, placeholder: "Paste ChatGPT's SETPOINT block here", value: st.ai.text,
+            oninput: e => { st.ai.text = e.target.value; st.ai.off = new Set(); paintAi(); } });
+          ta.value = st.ai.text;
+          const paintAi = () => {
+            out.innerHTML = "";
+            if (!st.ai.text.trim()) return;
+            const r = E.parseAiEstimate(st.ai.text);
+            if (!r.items.length) { out.append(h("div", { class: "empty-state" }, h("b", null, "Couldn't find any food lines"), "Copy the whole code block ChatGPT sent back, starting at SETPOINT.")); return; }
+            const on = r.items.filter((_, i) => !st.ai.off.has(i));
+            const sum = on.reduce((a, x) => ({ kcal: a.kcal + x.kcal, p: a.p + x.p, f: a.f + x.f, c: a.c + x.c }), { kcal: 0, p: 0, f: 0, c: 0 });
+            out.append(h("div", { class: "aires" }, r.items.map((x, i) => h("label", { class: "airow" + (st.ai.off.has(i) ? " off" : "") },
+              h("input", { type: "checkbox", checked: st.ai.off.has(i) ? null : true, onchange: e => { if (e.target.checked) st.ai.off.delete(i); else st.ai.off.add(i); paintAi(); } }),
+              h("div", null, h("b", null, x.name), h("span", null, [x.portion, `P ${x.p} · F ${x.f} · C ${x.c}`].filter(Boolean).join(" · ")),
+                x.mismatch ? h("em", null, `Macros add up to ${r0(x.p * 4 + x.f * 9 + x.c * 4)} kcal, not ${x.kcal}. Worth a second look.`) : null),
+              h("strong", null, x.kcal)))));
+            if (r.confidence || r.notes) out.append(h("p", { class: "note" }, [r.confidence ? `Confidence: ${r.confidence}${r.error ? " (" + r.error + ")" : ""}.` : "", r.notes || ""].filter(Boolean).join(" ")));
+            out.append(h("button", { class: "btn primary block", style: { marginTop: "12px" }, disabled: on.length ? null : true, onclick: () => {
+              on.forEach(x => addEntry({ n: x.name, kcal: x.kcal, p: x.p, f: x.f, c: x.c, unit: x.portion || "portion", g: 0 }, 1, null, true));
+              save(); paintTop(); LOGGED = true;
+              toast(`Logged ${on.length} item${on.length > 1 ? "s" : ""} · ${r0(sum.kcal)} kcal`);
+              st.ai = { text: "", off: new Set() }; paintBody();
+            } }, `Log ${on.length} item${on.length === 1 ? "" : "s"} · ${r0(sum.kcal)} kcal`));
+          };
+          body.append(
+            h("div", { class: "aistep" }, h("i", null, "1"), h("div", null, h("b", null, "Copy the prompt"), h("span", null, "It tells ChatGPT (or Claude, Gemini) to reply in a format Setpoint can read."))),
+            h("div", { style: { display: "flex", gap: "8px", margin: "8px 0 14px 40px" } },
+              h("button", { class: "btn sm", onclick: () => { (navigator.clipboard ? navigator.clipboard.writeText(E.AI_PROMPT) : Promise.reject()).then(() => toast("Prompt copied")).catch(() => { ta.value = E.AI_PROMPT; ta.select(); toast("Select all and copy it from the box"); }); } }, "Copy prompt"),
+              h("a", { class: "btn sm", href: "https://chatgpt.com/", target: "_blank", rel: "noopener" }, "Open ChatGPT")),
+            h("div", { class: "aistep" }, h("i", null, "2"), h("div", null, h("b", null, "Send it with your photo"), h("span", null, "Attach the photo, paste the prompt, send. Tap the copy button on the code block it sends back."))),
+            h("div", { class: "aistep", style: { marginTop: "14px" } }, h("i", null, "3"), h("div", null, h("b", null, "Paste the answer here"), h("span", null, "Untick anything you didn't eat. Edit amounts afterwards in the log if needed."))),
+            h("div", { style: { margin: "8px 0 0 40px" } },
+              navigator.clipboard && navigator.clipboard.readText ? h("button", { class: "btn sm", style: { marginBottom: "8px" }, onclick: () => navigator.clipboard.readText().then(t => { st.ai.text = t; ta.value = t; st.ai.off = new Set(); paintAi(); }).catch(() => toast("Long-press the box and choose Paste")) }, "Paste") : null,
+              ta),
+            out);
+          paintAi();
         } else if (st.tab === "quick") {
           foot.hidden = true;
           const v = { n: "", k: null, p: null, f: null, c: null };
@@ -1566,7 +1633,7 @@
         h("button", { class: "btn primary block", style: { marginTop: "16px" }, onclick: () => {
           ["w_kg", "w_bf", "w_mm"].forEach(id => { const el = $("#" + id); if (el) el.dispatchEvent(new Event("change")); });
           if (!v.kg || v.kg < 25 || v.kg > 350) { toast("Enter a weight between 25 and 350 kg"); return; }
-          S.weights[st.d] = { kg: r1(v.kg), bf: v.bf != null ? r1(v.bf) : null, mm: v.mm != null ? r1(v.mm) : null };
+          S.weights[st.d] = { kg: r1(v.kg), bf: v.bf != null ? r1(v.bf) : null, mm: v.mm != null ? r1(v.mm) : null };   // typed by you: beats Apple Health
           if (!S.goal.startWeight) { S.goal.startWeight = r1(v.kg); S.goal.startDate = st.d; }
           save(); closeSheet(true); render(false); toast(`Saved ${f1(v.kg)} kg`);
           if (then) then();
@@ -1760,6 +1827,168 @@
   }
 
   /* =================================================================
+     SYNC — Cloudflare Worker, encrypted. Config lives in its own
+     localStorage key (never synced); the derived AES key lives in
+     IndexedDB as a non-extractable CryptoKey, so the passphrase itself
+     is never stored anywhere.
+     ================================================================= */
+  const SKEY = "setpoint.sync";
+  let SC = (() => { try { return JSON.parse(localStorage.getItem(SKEY) || "{}"); } catch (e) { return {}; } })();
+  const saveSC = () => { try { localStorage.setItem(SKEY, JSON.stringify(SC)); } catch (e) { } };
+  let CKEY = null, SYNCING = false, syncT = null;
+  function idb() {
+    return new Promise((res, rej) => {
+      const r = indexedDB.open("setpoint", 1);
+      r.onupgradeneeded = () => r.result.createObjectStore("keys");
+      r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+    });
+  }
+  async function keyGet() { try { const db = await idb(); return await new Promise(res => { const q = db.transaction("keys").objectStore("keys").get("sync"); q.onsuccess = () => res(q.result || null); q.onerror = () => res(null); }); } catch (e) { return null; } }
+  async function keyPut(k) { try { const db = await idb(); await new Promise(res => { const t = db.transaction("keys", "readwrite"); t.objectStore("keys").put(k, "sync"); t.oncomplete = res; t.onerror = res; }); } catch (e) { } }
+  async function keyDel() { try { const db = await idb(); await new Promise(res => { const t = db.transaction("keys", "readwrite"); t.objectStore("keys").delete("sync"); t.oncomplete = res; t.onerror = res; }); } catch (e) { } }
+  function scheduleSync() {
+    if (!SC.enabled) return;
+    clearTimeout(syncT); syncT = setTimeout(() => runSync("change"), 4000);
+  }
+  async function runSync(reason) {
+    if (!SC.enabled || SYNCING) return;
+    if (!navigator.onLine && reason !== "manual") return;
+    CKEY = CKEY || await keyGet();
+    if (!CKEY) { SC.lastErr = "Enter your passphrase again on this device."; saveSC(); paintSyncDot(); return; }
+    SYNCING = true; paintSyncDot();
+    try {
+      const r = await Y.syncOnce(S, { cli: Y.client(SC), key: CKEY, salt: SC.salt });
+      if (r.changed) {
+        S = merge(r.S); SNAP = Y.hashes(S); persist(); render(false);
+        if (r.health) toast(`Apple Health: ${r.health} update${r.health === 1 ? "" : "s"} added`);
+      }
+      SC.lastSync = Date.now(); SC.lastErr = null; SC.ver = r.ver;
+      if (reason === "manual") toast("Synced");
+    } catch (e) {
+      SC.lastErr = e.message;
+      if (reason === "manual" || e.code === "AUTH" || e.code === "BAD_PASS") toast(e.message);
+    } finally { SYNCING = false; saveSC(); paintSyncDot(); }
+  }
+  function syncLabel() {
+    if (!SC.enabled) return "Not set up";
+    if (SYNCING) return "Syncing…";
+    if (SC.lastErr) return SC.lastErr;
+    if (!SC.lastSync) return "Connected";
+    const m = Math.round((Date.now() - SC.lastSync) / 60000);
+    return m < 1 ? "Synced just now" : m < 60 ? `Synced ${m} min ago` : `Synced ${dShort(E.isoDate(new Date(SC.lastSync)))}`;
+  }
+  function paintSyncDot() { document.querySelectorAll("[data-syncstatus]").forEach(el => { if (!el.classList.contains("sdot")) el.textContent = syncLabel(); el.dataset.state = !SC.enabled ? "off" : SC.lastErr ? "err" : SYNCING ? "busy" : "ok"; }); }
+
+  function viewSync() {
+    const root = h("div");
+    root.append(subhead("Sync & Apple Health"));
+    const f = { url: SC.url || "", appKey: SC.appKey || "", inboxKey: SC.inboxKey || "", pass: "", pass2: "" };
+    root.append(h("div", { class: "card syncstatus" },
+      h("div", { style: { display: "flex", alignItems: "center", gap: "10px" } }, h("i", { class: "sdot", "data-syncstatus": "", "data-state": "off" }), h("b", { "data-syncstatus": "" }, syncLabel())),
+      SC.enabled ? h("div", { class: "btnrow", style: { marginTop: "12px" } },
+        h("button", { class: "btn primary", onclick: () => runSync("manual") }, "Sync now"),
+        h("button", { class: "btn", onclick: () => confirmSheet("Disconnect this device?", "Stops syncing on this device and forgets the key. Your data stays here and in the cloud.", "Disconnect", async () => { SC.enabled = false; CKEY = null; await keyDel(); saveSC(); render(false); }) }, "Disconnect")) : null));
+    setTimeout(paintSyncDot, 0);
+
+    if (!SC.enabled) {
+      const keysOut = h("div");
+      root.append(section("1 · Worker"));
+      root.append(h("div", { class: "card" },
+        h("p", { class: "note", style: { marginTop: 0 } }, "Deploy the Worker in the repo's worker folder to your free Cloudflare account (walkthrough in worker/README.md), then paste its address here."),
+        field("Worker address", h("input", { class: "inp", type: "url", placeholder: "https://setpoint-sync.yourname.workers.dev", value: f.url, oninput: e => f.url = e.target.value.trim() })),
+        h("div", { style: { height: "12px" } }),
+        field("App key", h("input", { class: "inp", id: "sy_app", type: "text", autocomplete: "off", value: f.appKey, oninput: e => f.appKey = e.target.value.trim() })),
+        h("button", { class: "btn sm", style: { marginTop: "12px" }, onclick: () => {
+          f.appKey = Y.randomKey(); f.inboxKey = Y.randomKey(); $("#sy_app").value = f.appKey;
+          keysOut.innerHTML = "";
+          keysOut.append(h("p", { class: "note" }, "New keys. In Cloudflare, add both as secrets on the Worker (Settings → Variables and Secrets), with exactly these names:"),
+            copyRow("APP_KEY", f.appKey), copyRow("INBOX_KEY", f.inboxKey),
+            h("p", { class: "note" }, "They're saved on this device when you connect. On your other devices, paste the same app key rather than generating new ones."));
+        } }, "Generate keys for a new Worker"),
+        keysOut));
+      root.append(section("2 · Passphrase"));
+      root.append(h("div", { class: "card" },
+        h("p", { class: "note", style: { marginTop: 0 } }, "Your data is encrypted with this before it leaves the phone. Cloudflare never sees it. Use the same passphrase on every device. If you lose it, the cloud copy can't be recovered (this device's copy is unaffected)."),
+        field("Passphrase", h("input", { class: "inp", type: "password", autocomplete: "new-password", oninput: e => f.pass = e.target.value })),
+        h("div", { style: { height: "12px" } }),
+        field("Confirm", h("input", { class: "inp", type: "password", autocomplete: "new-password", oninput: e => f.pass2 = e.target.value }))));
+      root.append(h("button", { class: "btn primary block", style: { marginTop: "16px", height: "54px" }, onclick: () => connect(f) }, "Connect this device"));
+    } else {
+      root.append(section("Apple Health"));
+      root.append(h("div", { class: "card" },
+        h("p", { class: "note", style: { marginTop: 0 } }, "A Shortcut on your iPhone sends each morning's weigh-in, body fat and steps to the Worker's inbox. Setpoint picks them up the next time it syncs. A weight you type yourself always wins over the Health reading for that day."),
+        SC.inboxKey ? copyRow("Inbox key (for the Shortcut)", SC.inboxKey) : h("p", { class: "note" }, "The inbox key was generated on another device. Copy it from there, or from Cloudflare."),
+        copyRow("Inbox address", (SC.url || "").replace(/\/+$/, "") + "/inbox"),
+        h("button", { class: "btn block", style: { marginTop: "12px" }, onclick: () => push({ v: "shortcut" }) }, "Set up the Shortcut")));
+      root.append(section("This device"));
+      root.append(h("div", { class: "card" }, kv("Worker", (SC.url || "").replace(/^https?:\/\//, "")), kv("Cloud version", SC.ver || "—"), kv("Encryption", "AES-GCM 256, key from your passphrase")));
+    }
+    return root;
+  }
+  function copyRow(label, value) {
+    return h("div", { class: "copyrow" }, h("span", null, label), h("code", null, value),
+      h("button", { class: "btn sm", onclick: () => { if (navigator.clipboard) navigator.clipboard.writeText(value).then(() => toast("Copied")).catch(() => toast("Select and copy it manually")); else toast("Select and copy it manually"); } }, "Copy"));
+  }
+  async function connect(f) {
+    if (!/^https:\/\/.+/.test(f.url)) { toast("Enter the Worker's https address"); return; }
+    if (!f.appKey || f.appKey.length < 16) { toast("Enter the app key (or generate one)"); return; }
+    if (f.pass.length < 8) { toast("Use a passphrase of at least 8 characters"); return; }
+    if (f.pass !== f.pass2) { toast("The two passphrases don't match"); return; }
+    toast("Connecting…");
+    const cli = Y.client({ url: f.url, appKey: f.appKey });
+    try {
+      const info = await cli.ping();
+      if (!info || info.service !== "setpoint-sync") throw new Error("That address isn't a Setpoint Worker.");
+      if (!info.configured) throw new Error("The Worker is missing its secrets or KV binding. See worker/README.md.");
+      const cur = await cli.getState();
+      const salt = cur.blob ? cur.blob.salt : Y.randomB64(16);
+      const key = await Y.deriveKey(f.pass, salt);
+      let remote = null;
+      if (cur.blob) remote = await Y.open(cur.blob, key);   // throws BAD_PASS on the wrong passphrase
+      const finish = async (mode) => {
+        if (mode === "replace" && remote) { S = merge(remote); S.settings.demo = false; SNAP = Y.hashes(S); persist(); }
+        else if (S.settings.demo) { const th = S.settings.theme; S = blank(); S.settings.theme = th; SNAP = Y.hashes(S); persist(); }
+        Object.assign(SC, { url: f.url, appKey: f.appKey, inboxKey: f.inboxKey || SC.inboxKey || "", salt, enabled: true, lastErr: null });
+        CKEY = key; await keyPut(key); saveSC();
+        await runSync("manual"); render(true);
+      };
+      if (remote) {
+        const nW = Object.keys(remote.weights || {}).length, nD = Object.keys(remote.intake || {}).length;
+        openSheet(sh => sh.append(h("div", { class: "sheet-body" },
+          h("h3", { class: "stitle" }, "Cloud copy found"),
+          h("p", { class: "note" }, `${nW} weigh-ins and ${nD} logged days are already in the cloud. What should happen to this device's data?`),
+          h("button", { class: "btn primary block", style: { marginTop: "14px" }, onclick: () => { closeSheet(true); finish("replace"); } }, "Use the cloud copy"),
+          S.settings.demo ? null : h("button", { class: "btn block", style: { marginTop: "10px" }, onclick: () => { closeSheet(true); finish("merge"); } }, "Merge both"),
+          h("p", { class: "note" }, S.settings.demo ? "This device only has example data, so it'll be replaced." : "Merge keeps everything from both. Pick this if you've logged on this device too."))));
+      } else await finish("merge");
+    } catch (e) { toast(e.message); }
+  }
+
+  function viewShortcut() {
+    const root = h("div");
+    root.append(subhead("Apple Health Shortcut"));
+    const step = (n, title, body) => h("div", { class: "step" }, h("i", null, n), h("div", null, h("b", null, title), body));
+    const url = (SC.url || "https://YOUR-WORKER.workers.dev").replace(/\/+$/, "") + "/inbox";
+    root.append(h("div", { class: "card" },
+      h("p", { class: "note", style: { marginTop: 0 } }, "About five minutes, once. Every morning after that: step on the scale, open Zepp Life so it syncs, close it. The Shortcut runs by itself when Zepp Life closes. Apple Health can't be read while the phone is locked, which is why it triggers on closing Zepp Life rather than at a set time."),
+      h("p", { class: "note" }, "First check Zepp Life shares with Health: Health app → your profile → Apps → Zepp Life → turn on Weight and Body Fat Percentage.")));
+    root.append(h("div", { class: "card steps-card" },
+      step(1, "Create the Shortcut", h("span", null, "Shortcuts app → + → name it “Setpoint Health”.")),
+      step(2, "Latest weight", h("span", null, "Add ", h("em", null, "Find Health Samples"), ": Type = Weight, Sort by Start Date, Order Latest First, Limit 1. Then ", h("em", null, "Get Details of Health Sample"), " → Value. Rename that variable “Weight”.")),
+      step(3, "Latest body fat", h("span", null, "Repeat with Type = Body Fat Percentage → Value. Rename it “BodyFat”.")),
+      step(4, "Today's steps", h("span", null, "Add ", h("em", null, "Find Health Samples"), ": Type = Steps, Start Date is today. Then ", h("em", null, "Calculate Statistics"), " → Sum. Rename it “Steps”.")),
+      step(5, "Date", h("span", null, "Add ", h("em", null, "Format Date"), " on Current Date, Custom format ", h("code", null, "yyyy-MM-dd"), ". Rename it “Day”.")),
+      step(6, "Send it", h("span", null, "Add ", h("em", null, "Get Contents of URL"), ":", h("br"), "URL: ", h("code", null, url), h("br"), "Method: POST", h("br"),
+        "Headers: ", h("code", null, "Authorization"), " = ", h("code", null, "Bearer " + (SC.inboxKey || "YOUR-INBOX-KEY")), h("br"),
+        "Request Body: JSON with fields ", h("code", null, "date"), " = Day, ", h("code", null, "weight"), " = Weight, ", h("code", null, "bodyFat"), " = BodyFat, ", h("code", null, "steps"), " = Steps.")),
+      step(7, "Test it", h("span", null, "Tap ▶. You should see ", h("code", null, "{\"ok\":true,…}"), ". Open Setpoint and the weigh-in appears after it syncs.")),
+      step(8, "Automate it", h("span", null, "Automation tab → + → App → Zepp Life → ", h("em", null, "Is Closed"), " → Run Immediately → pick “Setpoint Health”."))));
+    root.append(h("p", { class: "note" }, "The inbox key can only add readings. If it ever leaks, the worst anyone can do is add a fake weigh-in, which you can delete. Units are handled: pounds are converted, and body fat as 0.32 or 32% both work."));
+    if (SC.inboxKey) root.append(copyRow("Inbox key", SC.inboxKey));
+    return root;
+  }
+
+  /* =================================================================
      boot
      ================================================================= */
   function boot() {
@@ -1785,6 +2014,9 @@
       if (document.visibilityState === "visible" && SEL > today()) { SEL = today(); render(false); }
     });
     try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch (e) { }
+    if (SC.enabled) setTimeout(() => runSync("open"), 600);
+    document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") runSync("focus"); });
+    window.addEventListener("online", () => runSync("online"));
   }
   window.Setpoint = { get state() { return S; }, render, seedDemo };
   boot();

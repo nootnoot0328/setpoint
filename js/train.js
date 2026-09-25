@@ -14,7 +14,27 @@
     const EX = window.SP_EX;
     const S = () => X.S();
     const T = () => { const s = S(); if (!s.train) s.train = { profile: null, plan: null, log: [], active: null }; if (!s.train.log) s.train.log = []; return s.train; };
-    const exOf = id => EX.ex[id] || { id, n: id.replace(/_/g, " "), type: "reps", pats: [], steps: [], img: false, eq: "bw", inc: 0 };
+    const ALL = () => window.SP_EXALL || null;
+    const exOf = id => EX.ex[id] || (ALL() && ALL()[id]) || { id, n: String(id).replace(/_/g, " "), type: "reps", pats: [], steps: [], img: false, eq: "bw", eqn: "Other", inc: 0, mus: [], sec: [] };
+    let allP = null;
+    function ensureAll() {
+      if (ALL()) return Promise.resolve(ALL());
+      if (!allP) allP = new Promise((res, rej) => {
+        const sc = document.createElement("script"); sc.src = "js/exlib-full.js";
+        sc.onload = () => res(ALL()); sc.onerror = () => { allP = null; rej(new Error("Couldn't load the exercise library")); };
+        document.head.appendChild(sc);
+      });
+      return allP;
+    }
+    const EQUIP = ["Bodyweight", "Pull-up bar", "Dumbbell", "Kettlebell", "Band", "Barbell", "Cable", "Machine", "Other"];
+    function defaultEquip() {
+      const p = (T().profile && T().profile.equip) || [];
+      const s = new Set(["Bodyweight"]);
+      if (p.includes("bar")) s.add("Pull-up bar");
+      if (p.includes("db")) ["Dumbbell", "Kettlebell", "Band"].forEach(x => s.add(x));
+      if (p.includes("gym")) EQUIP.forEach(x => s.add(x));
+      return [...s];
+    }
     const EQ_LABEL = { bw: "Bodyweight", bar: "Pull-up bar", db: "Dumbbells", gym: "Gym" };
     const RATING = ["Way too easy", "Easy", "Just right", "Hard", "Way too hard"];
     const TI = {
@@ -34,14 +54,24 @@
 
     /* ---------------------------------------------------- demo images
        Two-frame loop (start / end position) makes a lightweight "GIF". */
+    /* Images load from the exercise database's own GitHub copy via the
+       jsDelivr CDN (pinned commit), falling back to raw.githubusercontent,
+       then to an icon. The service worker caches each one after first use. */
+    function imgSrc(id, i, raw) { return (raw ? EX.IMG.raw : EX.IMG.cdn) + encodeURIComponent(id) + "/" + i + ".jpg"; }
     function demo(ex, cls) {
-      if (!ex.img) return h("div", { class: "demo none " + (cls || ""), html: svg(ex.pats && ex.pats.includes("hiit") ? TI.run : TI.dumbbell) });
+      const icon = svg(ex.pats && ex.pats.includes("hiit") ? TI.run : TI.dumbbell);
+      if (!ex.img) return h("div", { class: "demo none " + (cls || ""), html: icon });
       const d = h("div", { class: "demo " + (cls || "") });
-      const a = h("img", { src: `exercises/${ex.id}-0.jpg`, alt: "", loading: "lazy", decoding: "async" });
-      const b = h("img", { src: `exercises/${ex.id}-1.jpg`, alt: "", loading: "lazy", decoding: "async", class: "f2" });
-      const fail = () => { d.classList.add("none"); d.innerHTML = svg(TI.dumbbell); };
-      a.onerror = fail;
-      d.append(a, b);
+      const mk = (i, extra) => {
+        const im = h("img", { src: imgSrc(ex.id, i), alt: i ? "" : ex.n + " demonstration", loading: "lazy", decoding: "async", class: extra || null });
+        im.onerror = () => {
+          if (!im.dataset.raw) { im.dataset.raw = "1"; im.src = imgSrc(ex.id, i, true); }
+          else if (!i) { d.classList.add("none"); d.innerHTML = icon; }
+          else im.remove();
+        };
+        return im;
+      };
+      d.append(mk(0), mk(1, "f2"));
       return d;
     }
 
@@ -66,6 +96,31 @@
         ? `${ds[0].w ?? "?"} kg × ${ds.map(s => s.reps).join(", ")}`
         : ex.type === "time" ? ds.map(s => s.reps + "s").join(", ") : `${ds.map(s => s.reps).join(", ")} reps`;
       return `Last (${X.dShort(last.date)}): ${body}`;
+    }
+
+    /* ============================================================ RECOVERY */
+    let MAPVIEW = 0;
+    const hrs = n => n >= 24 ? `${Math.floor(n / 24)} d ${n % 24} h` : `${n} h`;
+    function recoveryBlock(rec) {
+      const tired = Object.entries(rec).filter(([, v]) => v.status !== "ready").sort((a, b) => b[1].fatigue - a[1].fatigue);
+      const out = [bodyMap({ recovery: rec }), legend()];
+      if (tired.length) out.push(h("div", { class: "musclelist" }, tired.map(([r, v], i) => h("div", { class: "hb rec" },
+        h("span", null, E.REGION_NAME[r]),
+        h("div", { class: "hbt" }, h("i", { class: "r-" + v.status, style: { width: `${Math.min(100, v.fatigue * 100)}%`, "--i": i } })),
+        h("b", null, hrs(v.hoursLeft))))));
+      else out.push(h("div", { class: "empty-state" }, "Everything's recovered. Train whatever you like."));
+      out.push(h("p", { class: "note" }, "An estimate from what you logged, not a measurement. Hard sets in the last few days load each muscle; the load fades over about 72 h for big groups (legs, back, chest) and 48 h for smaller ones. Sets near failure count more. Times show when a muscle drops back to ready. If you feel fine sooner, you probably are."));
+      return out;
+    }
+    function legend() {
+      return h("div", { class: "rlegend" }, [["m-off", "Ready"], ["r-nearly", "Nearly ready"], ["r-recovering", "Recovering"], ["m-on", "Selected"]]
+        .map(([c, t]) => h("span", null, h("i", { class: c }), t)));
+    }
+    // regions a plan day works that are still recovering
+    function dayConflicts(day, rec) {
+      const regs = new Set();
+      day.slots.forEach(sl => { const x = exOf(sl.ex); (x.mus || []).map(E.muscleToRegion).filter(Boolean).forEach(r => regs.add(r)); if (E.PAT_GROUP_REGION[sl.pat]) regs.add(E.PAT_GROUP_REGION[sl.pat]); });
+      return [...regs].filter(r => rec[r] && rec[r].status === "recovering").sort((a, b) => rec[b].fatigue - rec[a].fatigue);
     }
 
     /* ============================================================ HOME */
@@ -101,6 +156,16 @@
               h("div", { class: "pt" }, h("b", null, ex.n), h("span", null, targetText(sl, ex, t))),
               h("span", { html: svg(I.chev, "chev") }));
           })));
+          const rec = E.recovery(S()), clash = dayConflicts(day, rec);
+          if (clash.length) {
+            const others = plan.days.map((d, i) => ({ i, n: dayConflicts(d, rec).length })).filter(o => o.i !== pick).sort((a, b) => a.n - b.n);
+            const better = others.find(o => o.n === 0);
+            const names = clash.slice(0, 3).map(r => E.REGION_NAME[r]);
+            card.append(h("div", { class: "recwarn" },
+              h("b", null, `${names.join(", ")} still recovering`),
+              h("span", null, `About ${hrs(rec[clash[0]].hoursLeft)} to go. ` + (better ? `${plan.days[better.i].name} works fresher muscles today.` : "Going ahead is fine if you feel good; expect to be a little weaker, and don't chase a new best.")),
+              better ? h("button", { class: "chip static", onclick: () => { pick = better.i; paint(); } }, `Switch to ${plan.days[better.i].name}`) : null));
+          }
           const est = day.slots.reduce((a, s) => a + s.sets * (s.rest + 45), 0);
           card.append(h("button", { class: "btn primary block", style: { marginTop: "14px", height: "54px" }, disabled: tr.active ? true : null, onclick: () => startWorkout(pick) },
             h("span", { html: svg(TI.play) }), `Start ${day.name}`, h("span", { class: "muted small", style: { fontWeight: 400 } }, ` · ~${Math.round(est / 60)} min`)));
@@ -108,6 +173,14 @@
         paint();
         root.append(card);
       }
+
+      // freestyle
+      root.append(X.section("Freestyle"));
+      root.append(h("button", { class: "card fscard", onclick: () => X.push({ v: "freestyle" }) },
+        bodyMap({ recovery: E.recovery(S()) }),
+        h("div", null, h("b", null, "Pick muscles, get a workout"), h("span", null, "Tap the body diagram and Setpoint picks exercises for the equipment you have today, steering around muscles that are still recovering."),
+          h("span", { class: "go" }, "Open body map ›"))));
+      ensureAll().catch(() => { });   // warm the full library in the background
 
       // conditioning
       root.append(X.section("Conditioning"));
@@ -122,9 +195,8 @@
       const wk = tr.log.filter(s => s.date >= ws && s.date <= days[6]);
       const lifts = wk.filter(s => s.type === "lift").length, hiits = wk.filter(s => s.type === "hiit").length;
       const planned = tr.plan ? Math.min(tr.plan.perWeek, 4) : null;
-      const sets = E.weeklySets(S());
-      const groups = ["Chest", "Back", "Shoulders", "Quads", "Glutes & hams", "Arms", "Core", "Calves"];
-      const max = Math.max(20, ...Object.values(sets));
+      const heat = E.muscleSets(S(), ws, days[6]);
+      const heatList = Object.entries(heat).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]);
       root.append(h("div", { class: "card" },
         h("div", { class: "weekdots" }, days.map(d => {
           const ss = wk.filter(s => s.date === d);
@@ -134,11 +206,23 @@
         h("div", { class: "muted", style: { textAlign: "center", marginTop: "10px", fontSize: "15px" } },
           `${lifts} lifting${planned ? ` of ${planned} planned` : ""} · ${hiits} conditioning`),
         h("div", { class: "divider" }),
-        h("div", { class: "hbars" }, groups.map((g, i) => h("div", { class: "hb" },
-          h("span", null, g),
-          h("div", { class: "hbt" }, h("i", { style: { width: `${(sets[g] || 0) / max * 100}%`, "--i": i } }), h("em", { style: { left: `${10 / max * 100}%` } })),
-          h("b", null, sets[g] || 0)))),
-        h("p", { class: "note" }, "Hard sets per muscle this week. The tick marks 10 sets, roughly where most of the growth benefit shows up in the research (Schoenfeld et al., J Sports Sci 2017). Fewer still works; it's just slower.")));
+        (() => {
+          const box = h("div");
+          const paintMap = () => {
+            box.innerHTML = "";
+            box.append(X.seg(["Recovery", "Weekly sets"], MAPVIEW, i => { MAPVIEW = i; paintMap(); }, "mapseg"));
+            if (MAPVIEW === 0) box.append(...recoveryBlock(E.recovery(S())));
+            else box.append(bodyMap({ heat }),
+              heatList.length ? h("div", { class: "musclelist" }, heatList.map(([r, v], i) => h("div", { class: "hb" },
+                h("span", null, E.REGION_NAME[r]),
+                h("div", { class: "hbt" }, h("i", { style: { width: `${Math.min(100, v / 20 * 100)}%`, "--i": i } }), h("em", { style: { left: "50%" } })),
+                h("b", null, Math.round(v * 10) / 10))))
+                : h("div", { class: "empty-state" }, "No lifting logged this week yet."),
+              h("p", { class: "note" }, "Hard sets per muscle this week; secondary muscles count as half a set. The tick marks 10 sets, roughly where most of the growth benefit shows up in the research (Schoenfeld et al., J Sports Sci 2017). Fewer still works; it's just slower."));
+          };
+          paintMap();
+          return box;
+        })()));
 
       // history
       if (tr.log.length) {
@@ -225,6 +309,189 @@
       });
     }
 
+
+    /* ===================================================== body map
+       Hand-drawn front/back figure. Each muscle shape carries data-r =
+       region key (engine.REGION). mode "select": tap to toggle; mode
+       "heat": shade by hard sets this week. */
+    /* Anatomical figure, drawn for Setpoint. Each shape is the viewer's-left
+       half; mir() adds the mirror image about x = 100. */
+    const mir = p => `${p}<g transform="matrix(-1 0 0 1 200 0)">${p}</g>`;
+    const SIL = mir(`<path d="M100 10 C88 10 82 20 82 32 C82 44 87 53 93 56 L93 64 C84 68 70 70 60 74 C50 78 45 88 45 100 C43 118 42 135 41 150 C39 165 36 178 34 195 C32 212 31 226 31 236 C28 244 29 256 34 261 C39 263 42 255 41 246 C42 237 44 226 46 212 C49 196 52 181 54 168 C56 150 59 132 62 118 C64 140 67 160 69 176 C68 192 64 204 64 218 C63 250 66 290 70 318 C70 340 66 360 68 382 C70 396 70 402 69 408 C66 414 69 419 80 419 C88 419 91 415 89 407 C87 391 90 372 91 350 C92 336 91 326 93 318 C95 290 97 262 98 244 L100 240 Z"/>`);
+    const FRONT = [
+      ["traps", mir(`<path d="M94 62 C88 66 78 69 68 72 C78 73 88 72 95 70 Z"/>`)],
+      ["shoulders", mir(`<path d="M62 75 C51 79 46 89 46 101 C46 109 48 115 50 119 C54 110 60 99 67 90 C70 84 68 77 62 75 Z"/>`)],
+      ["chest", mir(`<path d="M98 76 C88 74 76 75 68 82 C63 89 62 99 64 108 C72 118 87 120 98 114 Z"/>`)],
+      ["biceps", mir(`<path d="M51 121 C47 133 46 146 48 158 C51 164 55 162 56 156 C58 142 60 129 60 119 C57 114 53 115 51 121 Z"/>`)],
+      ["forearms", mir(`<path d="M43 172 C39 188 36 204 35 224 C37 230 41 230 43 224 C46 208 50 192 53 176 C51 168 46 166 43 172 Z"/>`)],
+      ["abs", mir(`<rect x="88" y="121" width="10" height="17" rx="4"/><rect x="88" y="141" width="10" height="17" rx="4"/><rect x="88" y="161" width="10" height="18" rx="4"/><path d="M88 182 L98 182 L98 214 C94 212 90 204 88 196 Z"/><path d="M69 124 C75 136 81 152 85 176 C85 190 83 200 81 206 C75 196 71 186 70 176 C70 160 69 142 69 124 Z"/>`)],
+      ["abductors", mir(`<path d="M66 206 C64 216 64 226 66 236 C70 234 74 224 76 214 C74 207 70 203 66 206 Z"/>`)],
+      ["adductors", mir(`<path d="M87 236 C89 251 90 266 90 279 C94 272 96 259 97 246 C96 239 92 235 87 236 Z"/>`)],
+      ["quads", mir(`<path d="M66 222 C63 248 64 282 70 312 C74 318 79 314 79 304 C79 278 78 252 76 232 C73 226 69 222 66 222 Z"/><path d="M78 226 C76 250 77 278 80 302 C82 308 86 308 88 300 C89 278 89 252 87 234 C85 228 81 224 78 226 Z"/><path d="M90 276 C88 290 88 304 91 316 C96 317 98 308 97 296 C96 286 94 279 90 276 Z"/>`)],
+      ["calves", mir(`<path d="M70 331 C67 346 67 362 70 376 C73 372 75 360 76 347 C76 339 74 333 70 331 Z"/><path d="M90 331 C92 345 92 360 89 374 C86 366 85 350 86 339 Z"/>`)]
+    ];
+    const BACK = [
+      ["traps", mir(`<path d="M100 56 C96 63 90 67 80 70 C71 72 64 74 61 76 C73 80 84 87 92 100 C95 112 98 124 100 133 Z"/>`)],
+      ["shoulders", mir(`<path d="M60 77 C50 81 46 91 46 102 C47 111 49 116 51 119 C56 107 62 95 71 87 C69 81 65 77 60 77 Z"/>`)],
+      ["upperback", mir(`<path d="M73 89 C67 97 65 107 67 116 C75 119 85 115 90 105 C87 97 81 91 73 89 Z"/>`)],
+      ["lats", mir(`<path d="M67 120 C67 137 69 156 72 173 C78 184 86 190 94 195 C92 176 90 156 89 137 C83 129 75 123 67 120 Z"/>`)],
+      ["triceps", mir(`<path d="M46 120 C43 133 43 147 46 160 C50 166 54 162 56 154 C57 141 59 129 60 119 C55 113 49 113 46 120 Z"/>`)],
+      ["forearms", mir(`<path d="M43 172 C39 188 36 204 35 224 C37 230 41 230 43 224 C46 208 50 192 53 176 C51 168 46 166 43 172 Z"/>`)],
+      ["lowerback", mir(`<path d="M93 140 C91 160 91 180 93 200 C95 204 98 204 99 200 L99 140 Z"/>`)],
+      ["glutes", mir(`<path d="M71 201 C65 213 65 230 71 240 C79 248 92 248 99 240 L99 207 C91 199 79 197 71 201 Z"/>`)],
+      ["hamstrings", mir(`<path d="M66 246 C64 270 66 296 72 316 C77 319 80 313 80 302 C80 282 79 264 77 248 C73 244 69 244 66 246 Z"/><path d="M80 248 C80 272 82 296 86 314 C91 317 96 310 96 298 C96 280 96 262 97 248 C91 244 85 244 80 248 Z"/>`)],
+      ["calves", mir(`<path d="M71 327 C67 341 67 357 71 371 C75 375 79 369 80 359 C81 347 79 335 75 327 Z"/><path d="M81 327 C81 341 83 357 87 373 C91 375 93 367 92 355 C92 343 91 333 87 327 Z"/>`)]
+    ];
+    /* opts.selected: Set of regions (select mode)
+       opts.recovery: engine.recovery() result, tints unselected muscles
+       opts.heat: {region: sets} for the weekly-volume view
+       opts.onToggle(region): makes muscles tappable */
+    function bodyMap(opts) {
+      const sel = opts.selected || new Set(), heat = opts.heat || null, rec = opts.recovery || null;
+      const shade = r => {
+        if (heat) { const v = heat[r] || 0; return v ? `class="mg" fill="var(--pro)" fill-opacity="${(0.25 + Math.min(1, v / 12) * 0.75).toFixed(2)}"` : `class="mg m-off"`; }
+        if (sel.has(r)) return `class="mg m-on"`;
+        if (rec && rec[r] && rec[r].status !== "ready") return `class="mg r-${rec[r].status}"`;
+        return `class="mg m-off"`;
+      };
+      const label = r => {
+        let t = E.REGION_NAME[r];
+        if (heat) t += ` · ${Math.round((heat[r] || 0) * 10) / 10} sets`;
+        else if (rec && rec[r] && rec[r].status !== "ready") t += ` · recovering, about ${rec[r].hoursLeft} h left`;
+        return t;
+      };
+      const group = (list, dx) => list.map(([r, shapes]) =>
+        `<g data-r="${r}" ${shade(r)} transform="translate(${dx} 0)" role="button" tabindex="0" aria-label="${label(r)}${sel.has(r) ? ", selected" : ""}"><title>${label(r)}</title>${shapes}</g>`).join("");
+      const wrap = document.createElement("div");
+      wrap.className = "bodymap" + (heat ? " heat" : "");
+      wrap.innerHTML = `<svg viewBox="0 0 420 440" role="group" aria-label="Body diagram">
+        <g class="sil">${SIL}</g><g class="sil" transform="translate(220 0)">${SIL}</g>
+        ${group(FRONT, 0)}${group(BACK, 220)}
+        <text x="100" y="436" text-anchor="middle">Front</text><text x="320" y="436" text-anchor="middle">Back</text></svg>`;
+      if (opts.onToggle) wrap.querySelectorAll(".mg").forEach(g => {
+        const go = () => opts.onToggle(g.dataset.r);
+        g.addEventListener("click", go);
+        g.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); go(); } });
+      });
+      return wrap;
+    }
+
+    /* ================================================== freestyle */
+    const FS = { regions: new Set(), picks: null, seed: 1 };
+    function viewFreestyle() {
+      const tr = T(), root = h("div");
+      root.append(X.subhead("Freestyle"));
+      if (!ALL()) {
+        root.append(h("div", { class: "card" }, h("div", { class: "empty-state" }, h("b", null, "Loading 740 exercises…"), "One moment.")));
+        ensureAll().then(() => X.render(false)).catch(e => X.toast(e.message));
+        return root;
+      }
+      tr.freeEquip = tr.freeEquip || defaultEquip();
+      const level = (tr.profile && tr.profile.level) || "beginner";
+      const rec = E.recovery(S());
+      const repick = () => { FS.picks = FS.regions.size ? E.pickForMuscles(ALL(), [...FS.regions], tr.freeEquip, level, { seed: FS.seed, fatigue: rec }) : null; };
+
+      root.append(h("p", { class: "note", style: { marginTop: "-6px", textAlign: "center" } }, "Tap the muscles you want to train. Yellow and red are still recovering."));
+      root.append(bodyMap({ selected: FS.regions, recovery: rec, onToggle: r => { if (FS.regions.has(r)) FS.regions.delete(r); else FS.regions.add(r); FS.picks = null; X.render(false); } }));
+      root.append(legend());
+      root.append(h("div", { style: { display: "flex", justifyContent: "center", margin: "4px 0 10px" } },
+        h("button", { class: "btn sm", onclick: () => { FS.regions = new Set(E.suggestRegions(S())); FS.picks = null; FS.seed = (FS.seed * 48271 + 11) % 2147483647; X.render(false); } }, "Suggest muscles for me")));
+      const tiredSel = [...FS.regions].filter(r => rec[r] && rec[r].status !== "ready");
+      if (tiredSel.length) root.append(h("div", { class: "recwarn" },
+        h("b", null, `${tiredSel.map(r => E.REGION_NAME[r]).join(", ")} ${tiredSel.length > 1 ? "are" : "is"} still recovering`),
+        h("span", null, `About ${hrs(Math.max(...tiredSel.map(r => rec[r].hoursLeft)))} to go. Training ${tiredSel.length > 1 ? "them" : "it"} hard again now mostly adds fatigue. Pick something else, or keep it light (fewer sets, stop 3 reps short).`)));
+      root.append(h("div", { class: "daychips", style: { justifyContent: "center", minHeight: "40px" } },
+        FS.regions.size ? [...FS.regions].map(r => h("button", { class: "chip on", onclick: () => { FS.regions.delete(r); FS.picks = null; X.render(false); } }, E.REGION_NAME[r] + "  ×"))
+          : h("span", { class: "muted" }, "Nothing selected yet")));
+
+      root.append(h("div", { class: "lbl" }, "Equipment you have today"));
+      root.append(h("div", { class: "daychips" }, EQUIP.map(q => h("button", { class: "chip" + (tr.freeEquip.includes(q) ? " on" : ""), onclick: () => {
+        tr.freeEquip = tr.freeEquip.includes(q) ? tr.freeEquip.filter(x => x !== q) : tr.freeEquip.concat([q]);
+        if (!tr.freeEquip.length) tr.freeEquip = ["Bodyweight"];
+        X.save(); FS.picks = null; X.render(false);
+      } }, q))));
+
+      if (FS.regions.size && !FS.picks) repick();
+      if (FS.picks) {
+        root.append(X.section("Your session", "Shuffle", () => { FS.seed = (FS.seed * 48271 + 7) % 2147483647; repick(); X.render(false); }));
+        if (!FS.picks.length) root.append(h("div", { class: "card" }, h("div", { class: "empty-state" }, "Nothing matches those muscles with this equipment. Add some equipment above.")));
+        FS.picks.forEach((p, i) => {
+          const x = exOf(p.ex), sc = E.freestyleScheme(x);
+          root.append(h("div", { class: "pick" },
+            h("button", { onclick: () => exInfo(x), "aria-label": "How to do " + x.n }, demo(x, "md")),
+            h("div", { class: "pt" }, h("span", { class: "tag" }, E.REGION_NAME[p.region]), h("b", null, x.n),
+              h("span", null, `${x.eqn} · ${sc.sets} × ${x.type === "time" ? sc.lo + "s" : sc.lo + "–" + sc.hi}`)),
+            h("div", { class: "pk" },
+              h("button", { class: "icon-btn flat", "aria-label": "Swap " + x.n, html: svg(TI.swap), onclick: () => {
+                const alt = E.pickForMuscles(ALL(), [p.region], tr.freeEquip, level, { seed: Date.now() % 99991, avoid: FS.picks.map(q => q.ex) })[0];
+                if (alt) { FS.picks[i] = alt; X.render(false); } else X.toast("No other option with this equipment");
+              } }),
+              h("button", { class: "icon-btn flat", "aria-label": "Remove " + x.n, html: svg(I.x), onclick: () => { FS.picks.splice(i, 1); X.render(false); } }))));
+        });
+        if (FS.picks.length) {
+          const est = FS.picks.reduce((a, p) => { const sc = E.freestyleScheme(exOf(p.ex)); return a + sc.sets * (sc.rest + 45); }, 0);
+          root.append(h("button", { class: "btn primary block", style: { marginTop: "14px", height: "56px" }, disabled: tr.active ? true : null, onclick: () => startFreestyle() },
+            h("span", { html: svg(TI.play) }), "Start workout", h("span", { class: "muted small", style: { fontWeight: 400 } }, ` · ~${Math.round(est / 60)} min`)));
+          if (tr.active) root.append(h("p", { class: "note", style: { textAlign: "center" } }, "Finish or discard your current workout first."));
+        }
+      }
+      return root;
+    }
+    function startFreestyle() {
+      const tr = T();
+      const names = [...FS.regions].map(r => E.REGION_NAME[r]);
+      tr.active = {
+        id: X.uid(), dayIdx: null, freestyle: true, started: Date.now(),
+        name: names.length > 2 ? `Freestyle · ${names.slice(0, 2).join(", ")} +${names.length - 2}` : `Freestyle · ${names.join(" & ")}`,
+        ex: FS.picks.map(p => {
+          const x = exOf(p.ex), sc = E.freestyleScheme(x), t = E.nextTarget(sc, x, lastFor(p.ex));
+          return { ex: p.ex, n: x.n, mus: x.mus || [], sec: x.sec || [], region: p.region, pat: null, lo: sc.lo, hi: sc.hi, rest: sc.rest,
+            sets: Array.from({ length: sc.sets }, () => ({ w: t.w, reps: null, rir: null, done: false })) };
+        })
+      };
+      FS.regions = new Set(); FS.picks = null;
+      X.save(); X.back(); setTimeout(() => X.push({ v: "workout" }), 60);
+    }
+
+    /* Add any exercise mid-workout: search + muscle + equipment filters. */
+    function addExerciseSheet() {
+      const tr = T();
+      X.openSheet(sh => {
+        const body = h("div", { class: "sheet-body" });
+        sh.append(body);
+        const st = { q: "", r: null, eq: new Set(tr.freeEquip || defaultEquip()) };
+        const list = h("div");
+        const paint = () => {
+          list.innerHTML = "";
+          if (!ALL()) { list.append(h("div", { class: "empty-state" }, "Loading library…")); return; }
+          const q = st.q.toLowerCase().split(/\s+/).filter(Boolean);
+          const target = st.r ? E.REGION[st.r] : null;
+          const xs = Object.values(ALL()).filter(x => st.eq.has(x.eqn) && (!target || (x.mus || []).some(m => target.includes(m))) && q.every(t => x.n.toLowerCase().includes(t)))
+            .sort((a, b) => (b.core ? 1 : 0) - (a.core ? 1 : 0) || a.n.localeCompare(b.n)).slice(0, 60);
+          if (!xs.length) list.append(h("div", { class: "empty-state" }, "Nothing matches. Loosen a filter."));
+          xs.forEach(x => list.append(h("button", { class: "pex", onclick: () => {
+            const reg = st.r || E.muscleToRegion((x.mus || [])[0]);
+            const sc = E.freestyleScheme(x), t = E.nextTarget(sc, x, lastFor(x.id));
+            tr.active.ex.push({ ex: x.id, n: x.n, mus: x.mus || [], sec: x.sec || [], region: reg, pat: null, lo: sc.lo, hi: sc.hi, rest: sc.rest,
+              sets: Array.from({ length: sc.sets }, () => ({ w: t.w, reps: null, rir: null, done: false })) });
+            X.save(); X.closeSheet(true); X.render(false); X.toast(`Added ${x.n}`);
+          } }, demo(x, "sm"), h("div", { class: "pt" }, h("b", null, x.n), h("span", null, `${x.eqn} · ${(x.mus || []).join(", ")}`)))));
+        };
+        body.append(h("h3", { class: "stitle" }, "Add exercise"),
+          h("input", { class: "inp", type: "search", placeholder: "Search 740 exercises", oninput: e => { st.q = e.target.value; paint(); } }),
+          h("div", { class: "lbl" }, "Muscle"),
+          h("div", { class: "daychips scrollx" }, [h("button", { class: "chip on", "data-r": "", onclick: e => pickR(null, e) }, "All"),
+            ...Object.keys(E.REGION).map(r => h("button", { class: "chip", "data-r": r, onclick: e => pickR(r, e) }, E.REGION_NAME[r]))]),
+          h("div", { class: "lbl" }, "Equipment"),
+          h("div", { class: "daychips scrollx" }, EQUIP.map(q => h("button", { class: "chip" + (st.eq.has(q) ? " on" : ""), onclick: e => {
+            if (st.eq.has(q)) st.eq.delete(q); else st.eq.add(q); e.currentTarget.classList.toggle("on"); paint(); } }, q))),
+          list);
+        function pickR(r, e) { st.r = r; e.currentTarget.parentNode.querySelectorAll(".chip").forEach(c => c.classList.toggle("on", (c.dataset.r || null) === (r || null) || (!r && !c.dataset.r))); paint(); }
+        paint();
+        ensureAll().then(paint).catch(() => { });
+      });
+    }
+
     /* ======================================================== workout */
     function startWorkout(dayIdx) {
       const tr = T(), day = tr.plan.days[dayIdx];
@@ -232,7 +499,7 @@
         id: X.uid(), dayIdx, name: day.name, started: Date.now(),
         ex: day.slots.map(sl => {
           const ex = exOf(sl.ex), t = E.nextTarget(sl, ex, lastFor(sl.ex));
-          return { ex: sl.ex, pat: sl.pat, lo: sl.lo, hi: sl.hi, rest: sl.rest, sets: Array.from({ length: sl.sets }, () => ({ w: t.w, reps: null, rir: null, done: false })) };
+          return { ex: sl.ex, n: ex.n, mus: ex.mus || [], sec: ex.sec || [], pat: sl.pat, lo: sl.lo, hi: sl.hi, rest: sl.rest, sets: Array.from({ length: sl.sets }, () => ({ w: t.w, reps: null, rir: null, done: false })) };
         })
       };
       X.save(); X.push({ v: "workout" });
@@ -319,7 +586,8 @@
         root.append(card);
       });
 
-      root.append(h("button", { class: "btn primary block", style: { marginTop: "16px", height: "56px" }, onclick: finishSheet }, "Finish workout"),
+      root.append(h("button", { class: "btn block", style: { marginTop: "4px", height: "52px" }, html: svg(I.plus) + "Add exercise", onclick: () => addExerciseSheet() }));
+      root.append(h("button", { class: "btn primary block", style: { marginTop: "12px", height: "56px" }, onclick: finishSheet }, "Finish workout"),
         h("button", { class: "btn block", style: { marginTop: "10px", color: "var(--bad)" }, onclick: () => X.confirmSheet("Discard this workout?", "Nothing from this session will be saved.", "Discard", () => { stopRest(); T().active = null; X.save(); X.go("train"); }) }, "Discard"));
       return root;
     }
@@ -327,10 +595,10 @@
     function doSwap(ei, newId, updatePlan) {
       const tr = T(), A = tr.active, e = A.ex[ei];
       const ex = exOf(newId), t = E.nextTarget({ lo: e.lo, hi: e.hi }, ex, lastFor(newId, A.id));
-      e.ex = newId;
+      e.ex = newId; e.n = ex.n; e.mus = ex.mus || []; e.sec = ex.sec || [];
       if (ex.type === "time") { e.lo = 30; e.hi = 60; }
       e.sets = e.sets.map(s => s.done ? s : { w: t.w, reps: null, rir: null, done: false });
-      if (updatePlan && tr.plan) {
+      if (updatePlan && tr.plan && A.dayIdx != null) {
         const slot = tr.plan.days[A.dayIdx].slots.find(s => s.pat === e.pat);
         if (slot) { slot.ex = newId; if (ex.type === "time") { slot.lo = 30; slot.hi = 60; } }
       }
@@ -338,7 +606,10 @@
     }
     function swapSheet(ei) {
       const tr = T(), e = tr.active.ex[ei];
-      const alts = E.alternatives(EX, e.pat, (tr.profile && tr.profile.equip) || ["gym"]).filter(x => x.id !== e.ex);
+      const alts = e.region && ALL()
+        ? E.pickForMuscles(ALL(), [e.region], tr.freeEquip || defaultEquip(), (tr.profile && tr.profile.level) || "beginner", { seed: Date.now() % 9973, avoid: tr.active.ex.map(x => x.ex) }).concat(
+            E.pickForMuscles(ALL(), [e.region], tr.freeEquip || defaultEquip(), "intermediate", { seed: 31, avoid: tr.active.ex.map(x => x.ex) })).map(p => exOf(p.ex)).filter((x, i, a) => a.findIndex(y => y.id === x.id) === i).slice(0, 10)
+        : E.alternatives(EX, e.pat, (tr.profile && tr.profile.equip) || ["gym"]).filter(x => x.id !== e.ex);
       let keep = true;
       X.openSheet(sh => {
         const body = h("div", { class: "sheet-body" });
@@ -349,7 +620,7 @@
             h("span", { class: "rt" }, h("b", { style: { fontSize: "16px" } }, "Use it in my plan from now on"))));
         if (!alts.length) body.append(h("div", { class: "empty-state" }, "No alternatives with your equipment. Add equipment in Rebuild plan."));
         alts.forEach(x => body.append(h("button", { class: "pex", onclick: () => { X.closeSheet(true); doSwap(ei, x.id, keep); } }, demo(x, "sm"),
-          h("div", { class: "pt" }, h("b", null, x.n), h("span", null, `${EQ_LABEL[x.eq]} · ${x.lvl}`)))));
+          h("div", { class: "pt" }, h("b", null, x.n), h("span", null, `${x.eqn || EQ_LABEL[x.eq]} · ${x.lvl}`)))));
         sh.append(body);
       });
     }
@@ -375,11 +646,11 @@
             h("div", { class: "stat" }, h("b", null, Math.round(vol), h("small", null, "kg")), h("span", null, "Volume"))),
           h("button", { class: "btn primary block", style: { marginTop: "20px" }, onclick: () => {
             stopRest();
-            const entry = { id: A.id, type: "lift", date: E.today(), name: A.name, dayIdx: A.dayIdx, dur, rating,
-              ex: A.ex.map(e => ({ ex: e.ex, pat: e.pat, lo: e.lo, hi: e.hi, sets: e.sets.map(s => Object.assign({}, s)) })) };
+            const entry = { id: A.id, type: "lift", date: E.today(), at: Date.now(), name: A.name, dayIdx: A.dayIdx, dur, rating,
+              ex: A.ex.map(e => { const x = exOf(e.ex); return { ex: e.ex, n: x.n, mus: x.mus || e.mus || [], sec: x.sec || e.sec || [], pat: e.pat, region: e.region, lo: e.lo, hi: e.hi, sets: e.sets.map(s => Object.assign({}, s)) }; }) };
             tr.log.push(entry);
             let msg = "Workout saved";
-            if (tr.plan && tr.plan.days[A.dayIdx]) {
+            if (tr.plan && A.dayIdx != null && tr.plan.days[A.dayIdx]) {
               E.applyRating(tr.plan.days[A.dayIdx], rating);
               if (rating === 1) msg = "Saved. Next time: one more set per exercise";
               if (rating === 5) msg = "Saved. Next time: one fewer set per exercise";
@@ -397,13 +668,39 @@
         const body = h("div", { class: "sheet-body" });
         body.append(demo(ex, "lg"),
           h("h3", { class: "stitle", style: { marginTop: "14px" } }, ex.n),
-          h("div", { class: "daychips" }, [EQ_LABEL[ex.eq], ex.lvl, ...(ex.mus || [])].filter(Boolean).map(t => h("span", { class: "chip static" }, t))),
+          h("div", { class: "daychips" }, [ex.eqn || EQ_LABEL[ex.eq], ex.lvl, ...(ex.mus || [])].filter(Boolean).map(t => h("span", { class: "chip static" }, t))),
+          (ex.sec || []).length ? h("div", { class: "muted small" }, "Also works: " + ex.sec.join(", ")) : null,
           h("ol", { class: "steps" }, (ex.steps || []).map(s => h("li", null, s))),
           ex.img ? h("p", { class: "note" }, "Images and instructions: free-exercise-db (public domain).") : null);
         sh.append(body);
       });
     }
     function viewLibrary() {
+      const root = h("div");
+      root.append(X.subhead("Exercises"));
+      if (!ALL()) { root.append(h("div", { class: "empty-state" }, "Loading library…")); ensureAll().then(() => X.render(false)).catch(e => X.toast(e.message)); return root; }
+      const st2 = { q: "", r: null, eq: null };
+      const list2 = h("div", { class: "card" });
+      const paint2 = () => {
+        list2.innerHTML = "";
+        const q = st2.q.toLowerCase().split(/\s+/).filter(Boolean), target = st2.r ? E.REGION[st2.r] : null;
+        const xs = Object.values(ALL()).filter(x => (!st2.eq || x.eqn === st2.eq) && (!target || (x.mus || []).some(m => target.includes(m))) && q.every(t => x.n.toLowerCase().includes(t)))
+          .sort((a, b) => (b.core ? 1 : 0) - (a.core ? 1 : 0) || a.n.localeCompare(b.n));
+        list2.append(h("div", { class: "muted small", style: { marginBottom: "6px" } }, `${xs.length} exercises`));
+        xs.slice(0, 80).forEach(x => list2.append(h("button", { class: "pex", onclick: () => exInfo(x) }, demo(x, "sm"),
+          h("div", { class: "pt" }, h("b", null, x.n), h("span", null, `${x.eqn} · ${(x.mus || []).join(", ")}`)))));
+        if (xs.length > 80) list2.append(h("div", { class: "empty-state" }, "Showing the first 80. Search or filter to narrow it down."));
+      };
+      root.append(h("input", { class: "inp", type: "search", placeholder: "Search 740 exercises", oninput: ev => { st2.q = ev.target.value; paint2(); } }));
+      root.append(h("div", { class: "lbl" }, "Muscle"), h("div", { class: "daychips scrollx" }, [null, ...Object.keys(E.REGION)].map(r =>
+        h("button", { class: "chip" + (r === st2.r ? " on" : ""), onclick: ev => { st2.r = r; ev.currentTarget.parentNode.querySelectorAll(".chip").forEach(c => c.classList.remove("on")); ev.currentTarget.classList.add("on"); paint2(); } }, r ? E.REGION_NAME[r] : "All"))));
+      root.append(h("div", { class: "lbl" }, "Equipment"), h("div", { class: "daychips scrollx" }, [null, ...EQUIP].map(q =>
+        h("button", { class: "chip" + (q === st2.eq ? " on" : ""), onclick: ev => { st2.eq = q; ev.currentTarget.parentNode.querySelectorAll(".chip").forEach(c => c.classList.remove("on")); ev.currentTarget.classList.add("on"); paint2(); } }, q || "All"))));
+      root.append(list2);
+      paint2();
+      return root;
+    }
+    function viewLibraryOld() {
       const root = h("div");
       root.append(X.subhead("Exercises"));
       const st = { q: "", eq: "all" };
@@ -640,7 +937,7 @@
           const w = x.type === "load" ? base[sl.ex] : null;
           const sets = Array.from({ length: sl.sets }, (_, i) => ({ w, reps: x.type === "time" ? 30 + k * 3 : Math.min(sl.hi, sl.lo + Math.floor(k / 2) + (i === 0 ? 1 : 0)), rir: 2 - (i === sl.sets - 1 ? 1 : 0), done: true }));
           if (x.type === "load" && sets.every(s => s.reps >= sl.hi)) base[sl.ex] += x.inc;
-          return { ex: sl.ex, pat: sl.pat, lo: sl.lo, hi: sl.hi, sets };
+          return { ex: sl.ex, n: x.n, mus: x.mus || [], sec: x.sec || [], pat: sl.pat, lo: sl.lo, hi: sl.hi, sets };
         });
         tr.log.push({ id: X.uid(), type: "lift", date, name: day.name, dayIdx: idx % tr.plan.days.length, dur: 42 + Math.round(rnd() * 12), rating: 3, ex });
         idx++;
@@ -651,8 +948,8 @@
     }
 
     return {
-      viewTrain, screens: { workout: viewWorkout, hiit: viewHiit, library: viewLibrary, trainhist: viewHist },
-      dashTiles, seed, startNext: () => { const tr = T(); if (tr.active) X.push({ v: "workout" }); else if (tr.plan) startWorkout(tr.plan.next % tr.plan.days.length); else { X.go("train"); planWizard(); } },
+      viewTrain, bodyMap, screens: { workout: viewWorkout, hiit: viewHiit, library: viewLibrary, trainhist: viewHist, freestyle: viewFreestyle },
+      dashTiles, seed, ensureAll, openFreestyle: () => X.push({ v: "freestyle" }), startNext: () => { const tr = T(); if (tr.active) X.push({ v: "workout" }); else if (tr.plan) startWorkout(tr.plan.next % tr.plan.days.length); else { X.go("train"); planWizard(); } },
       stopAll: () => { stopRest(); }
     };
   };

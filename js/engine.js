@@ -598,7 +598,196 @@
      Activities, 2011: resistance training ~5.0, HIIT/calisthenics ~8.0. */
   function sessionKcal(type, minutes, kg) { return r0((type === "hiit" ? 8 : 5) * kg * minutes / 60); }
 
+  /* ---------------------------------------------- freestyle picker
+     Body-diagram regions map to free-exercise-db muscle names. The picker
+     ranks candidates for each tapped muscle: curated core first, then
+     compound over isolation, then exercises at or below your level, with
+     a seeded shuffle so "Shuffle" gives a different but sensible pick.  */
+  const REGION = {
+    chest: ["chest"], shoulders: ["shoulders"], biceps: ["biceps"], triceps: ["triceps"], forearms: ["forearms"],
+    abs: ["abdominals"], quads: ["quadriceps"], adductors: ["adductors"], abductors: ["abductors"], calves: ["calves"],
+    traps: ["traps", "neck"], lats: ["lats"], upperback: ["middle back"], lowerback: ["lower back"],
+    glutes: ["glutes"], hamstrings: ["hamstrings"]
+  };
+  const REGION_NAME = { chest: "Chest", shoulders: "Shoulders", biceps: "Biceps", triceps: "Triceps", forearms: "Forearms", abs: "Abs",
+    quads: "Quads", adductors: "Adductors", abductors: "Abductors", calves: "Calves", traps: "Traps", lats: "Lats",
+    upperback: "Upper back", lowerback: "Lower back", glutes: "Glutes", hamstrings: "Hamstrings" };
+  function muscleToRegion(m) { for (const r in REGION) if (REGION[r].includes(m)) return r; return null; }
+
+  function rng(seed) { let s = (seed >>> 0) || 1; return () => { s ^= s << 13; s ^= s >>> 17; s ^= s << 5; return (s >>> 0) / 4294967296; }; }
+
+  function pickForMuscles(ALL, regions, equipNames, level, opts) {
+    opts = opts || {};
+    const eq = new Set(equipNames || ["Bodyweight"]);
+    const lv = LVL[level] ?? 0, r = rng(opts.seed || 1);
+    const per = regions.length === 1 ? 4 : regions.length === 2 ? 3 : 2;
+    const used = new Set(opts.avoid || []), out = [];
+    for (const reg of regions) {
+      const target = REGION[reg] || [];
+      const cands = Object.values(ALL).filter(x =>
+        x.mus && x.mus.some(m => target.includes(m)) && eq.has(x.eqn) && !used.has(x.id) &&
+        (LVL[x.lvl] ?? 0) <= lv + (lv === 0 ? 0 : 1) && !(x.pats || []).includes("hiit"));
+      const tired = x => (x.sec || []).reduce((a, m) => { const g = muscleToRegion(m); return a + (g && g !== reg && opts.fatigue && opts.fatigue[g] ? opts.fatigue[g].fatigue : 0); }, 0);
+      const scored = cands.map(x => ({ x, s: (x.core ? -3 : 0) + (x.mech === "compound" ? -1 : 0) + ((LVL[x.lvl] ?? 0) > lv ? 1.5 : 0) + tired(x) * 2 + r() * 2.2 }));
+      scored.sort((a, b) => a.s - b.s);
+      let n = 0;
+      for (const { x } of scored) {
+        if (n >= per || out.length >= (opts.max || 8)) break;
+        out.push({ ex: x.id, region: reg }); used.add(x.id); n++;
+      }
+    }
+    return out;
+  }
+  function freestyleScheme(ex) {
+    if (ex.type === "time") return { sets: 3, lo: 30, hi: 60, rest: 60 };
+    if (ex.type === "reps") return { sets: 3, lo: 10, hi: 20, rest: 75 };
+    return ex.mech === "compound" ? { sets: 3, lo: 8, hi: 12, rest: 120 } : { sets: 3, lo: 10, hi: 15, rest: 75 };
+  }
+  /* Hard sets per body region over [from, to]. Primary muscles count a full
+     set; secondary muscles half a set (a common convention in training
+     volume research). Uses the muscles stored on each logged exercise. */
+  function muscleSets(S, from, to) {
+    const out = {};
+    for (const s of (S.train && S.train.log) || []) {
+      if (s.type !== "lift" || s.date < from || s.date > to) continue;
+      for (const e of s.ex) {
+        const n = e.sets.filter(x => x.done).length; if (!n) continue;
+        const prim = new Set((e.mus || []).map(muscleToRegion).filter(Boolean));
+        if (!prim.size && PAT_GROUP_REGION[e.pat]) prim.add(PAT_GROUP_REGION[e.pat]);
+        const sec = new Set((e.sec || []).map(muscleToRegion).filter(x => x && !prim.has(x)));
+        prim.forEach(g => out[g] = (out[g] || 0) + n);
+        sec.forEach(g => out[g] = (out[g] || 0) + n / 2);
+      }
+    }
+    return out;
+  }
+  /* ---------- AI photo estimate import ----------
+     Reads the "SETPOINT" block produced by AI_PROMPT: one food per line,
+     "name | portion | kcal | protein | fat | carbs". Tolerant of code fences,
+     markdown table bars, units ("620 kcal", "30g"), commas and ranges
+     ("550-650" → midpoint). Skips header, TOTAL and CONFIDENCE lines. */
+  const AI_PROMPT = `You are estimating calories and macros from a food photo for my tracker. I'm in Singapore, so assume local hawker, kopitiam and food-court portions and cooking unless the photo clearly shows otherwise.
+
+How to estimate:
+1. List every separate item you can see, including drinks, sauces, gravy, sambal, fried shallots and cooking oil. Hawker food usually has more oil than it looks; include it.
+2. Estimate each portion in grams or ml. Use the plate, bowl, cutlery or my hand as a size reference if visible.
+3. Base calories on standard nutrition data (Singapore HPB figures where the dish is a known hawker dish).
+4. Protein, fat and carbs must roughly agree with calories (4 kcal/g protein and carbs, 9 kcal/g fat).
+5. If something is hidden or unclear (e.g. what's under the gravy, whether a drink has sugar), pick the most likely option and say so in the notes. Don't ask me questions first.
+
+Reply with ONLY this, inside one code block, no other text:
+
+SETPOINT
+item | portion | kcal | protein | fat | carbs
+<name> | <amount, e.g. 1 plate ~350 g> | <kcal> | <g> | <g> | <g>
+TOTAL | | <kcal> | <g> | <g> | <g>
+CONFIDENCE | <low/medium/high> | <likely error, e.g. ±25%>
+NOTES | <one short line: assumptions I should check>
+
+Use whole numbers only, one line per item.`;
+  function aiNum(s) {
+    s = String(s || "").replace(/,/g, "").trim();
+    const r = s.match(/(-?\d+(?:\.\d+)?)\s*(?:-|–|to)\s*(\d+(?:\.\d+)?)/);
+    if (r) return (+r[1] + +r[2]) / 2;
+    const m = s.match(/-?\d+(?:\.\d+)?/);
+    return m ? +m[0] : null;
+  }
+  function parseAiEstimate(text) {
+    const items = [], meta = {};
+    for (let line of String(text || "").split(/\r?\n/)) {
+      line = line.trim().replace(/^\|/, "").replace(/\|$/, "");
+      if (!line.includes("|")) continue;
+      const cells = line.split("|").map(c => c.trim());
+      const key = cells[0].toUpperCase().replace(/[*_]/g, "");
+      if (key === "CONFIDENCE") { meta.confidence = cells[1] || ""; meta.error = cells[2] || ""; continue; }
+      if (key === "NOTES") { meta.notes = cells.slice(1).join(" ").trim(); continue; }
+      if (key === "TOTAL") { const n = cells.slice(-4).map(aiNum); if (n.every(x => x != null)) meta.total = { kcal: n[0], p: n[1], f: n[2], c: n[3] }; continue; }
+      if (cells.length < 5 || /^-+$/.test(cells[0].replace(/[:\s]/g, ""))) continue;
+      const nums = cells.slice(-4).map(aiNum);
+      if (nums.some(x => x == null) || !cells[0] || /^item$/i.test(cells[0])) continue;
+      const name = cells[0].replace(/[*_`]/g, "").trim();
+      const portion = cells.length >= 6 ? cells[1] : "";
+      const [kcal, p, f, c] = nums.map(x => Math.max(0, Math.round(x)));
+      if (!kcal && !p && !f && !c) continue;
+      const fromMacros = p * 4 + f * 9 + c * 4;
+      items.push({ name, portion, kcal, p, f, c, mismatch: kcal > 0 && Math.abs(fromMacros - kcal) / kcal > 0.2 });
+    }
+    return { items, ...meta };
+  }
+
+  /* ---------- recovery ----------
+     A simple, explainable model, not a physiological measurement.
+     Each hard set loads a region (secondary muscles half, sets far from
+     failure count less). The load fades linearly to zero over the region's
+     window: 72 h for big muscle groups, 48 h for small ones. That matches
+     common guidance of 48-72 h between hard sessions for the same muscle
+     group (ACSM position stand on progression models, Med Sci Sports Exerc
+     2009;41:687-708), with bigger doses taking longer.
+     Fatigue 1.0 = about six hard sets just done. "Ready" = below 0.25. */
+  const BIG = new Set(["quads", "hamstrings", "glutes", "lowerback", "chest", "lats", "upperback"]);
+  const RECOVER_H = r => BIG.has(r) ? 72 : 48;
+  const READY = 0.25, FULL = 6;
+  function sessionTime(s) {
+    if (s.at) return s.at;
+    const d = parse(s.date); return new Date(d.getFullYear(), d.getMonth(), d.getDate(), 18).getTime();
+  }
+  function effort(set) { const r = set.rir; return r == null ? 0.85 : r <= 1 ? 1 : r <= 3 ? 0.8 : 0.5; }
+  function regionLoads(S, now) {
+    const out = [];   // [{region, load, t}] where t = session time
+    for (const s of (S.train && S.train.log) || []) {
+      if (s.type !== "lift") continue;
+      const t = sessionTime(s); if (t > now || now - t > 4 * 864e5) continue;
+      for (const e of s.ex || []) {
+        const load = (e.sets || []).filter(x => x.done).reduce((a, x) => a + effort(x), 0); if (!load) continue;
+        const prim = new Set((e.mus || []).map(muscleToRegion).filter(Boolean));
+        if (!prim.size && PAT_GROUP_REGION[e.pat]) prim.add(PAT_GROUP_REGION[e.pat]);
+        const sec = new Set((e.sec || []).map(muscleToRegion).filter(x => x && !prim.has(x)));
+        prim.forEach(r => out.push({ region: r, load, t }));
+        sec.forEach(r => out.push({ region: r, load: load / 2, t }));
+      }
+    }
+    return out;
+  }
+  function fatigueAt(loads, region, at) {
+    const W = RECOVER_H(region) * 36e5;
+    let f = 0;
+    for (const l of loads) if (l.region === region && at >= l.t) f += l.load * Math.max(0, 1 - (at - l.t) / W);
+    return f / FULL;
+  }
+  function recovery(S, now) {
+    now = now || Date.now();
+    const loads = regionLoads(S, now), out = {};
+    for (const r of Object.keys(REGION)) {
+      const f = fatigueAt(loads, r, now);
+      let h = 0;
+      if (f >= READY) { h = 1; while (h < 96 && fatigueAt(loads, r, now + h * 36e5) >= READY) h++; }
+      const last = loads.filter(l => l.region === r).reduce((a, l) => Math.max(a, l.t), 0) || null;
+      out[r] = { fatigue: Math.min(1.5, f), hoursLeft: h, status: f >= 0.6 ? "recovering" : f >= READY ? "nearly" : "ready", last };
+    }
+    return out;
+  }
+  /* Suggest muscles to train now: only ready regions, ranked by how far
+     each is below ~10 hard sets over the last 7 days, big groups first on
+     a tie. Returns 2-3 regions that pair sensibly. */
+  const PAIRS = [["chest", "triceps", "shoulders"], ["lats", "upperback", "biceps"], ["quads", "glutes", "calves"], ["hamstrings", "glutes", "lowerback"], ["shoulders", "traps", "abs"], ["chest", "lats", "abs"]];
+  function suggestRegions(S, now) {
+    now = now || Date.now();
+    const rec = recovery(S, now), to = isoDate(new Date(now)), wk = muscleSets(S, addDays(to, -6), to);
+    const need = r => (rec[r].status === "ready" ? 0 : 100) + (wk[r] || 0) - (BIG.has(r) ? 1 : 0);
+    let best = null;
+    for (const p of PAIRS) {
+      const ok = p.filter(r => rec[r].status === "ready");
+      if (ok.length < 2) continue;
+      const score = ok.reduce((a, r) => a + need(r), 0) / ok.length - ok.length * 0.5;
+      if (!best || score < best.score) best = { regions: ok, score };
+    }
+    if (best) return best.regions;
+    return Object.keys(REGION).filter(r => rec[r].status === "ready").sort((a, b) => need(a) - need(b)).slice(0, 3);
+  }
+  const PAT_GROUP_REGION = { squat: "quads", lunge: "quads", hinge: "hamstrings", hpush: "chest", vpush: "shoulders", delts: "shoulders", hpull: "upperback", vpull: "lats", core: "abs", bi: "biceps", tri: "triceps", calves: "calves" };
+
   return {
+    REGION, REGION_NAME, muscleToRegion, pickForMuscles, freestyleScheme, muscleSets, recovery, suggestRegions, RECOVER_H, PAT_GROUP_REGION, AI_PROMPT, parseAiEstimate,
     energyDensity, kalmanRun, packageKalman, estimateKalman, estimateWindow, KF,
     TEMPLATES, pickExercise, alternatives, buildPlan, nextTarget, applyRating, weeklySets, sessionKcal, PAT_GROUP,
     clamp, r0, r1, isoDate, parse, today, addDays, daysBetween, weekday, isWeekend, weekStart, range,
