@@ -1,6 +1,6 @@
 /* Setpoint service worker — makes the app work offline after the first visit.
    Bump VERSION whenever you change any file so phones pick up the update. */
-const VERSION = "setpoint-2.4.0";
+const VERSION = "setpoint-2.8.0";
 const SHELL = [
   "./", "index.html", "manifest.webmanifest",
   "css/app.css", "js/engine.js", "js/foods.js", "js/charts.js", "js/exercises.js", "js/train.js", "js/sync.js", "js/app.js", "js/exlib-full.js",
@@ -8,7 +8,9 @@ const SHELL = [
 ];
 
 self.addEventListener("install", e => {
-  e.waitUntil(caches.open(VERSION).then(c => c.addAll(SHELL)).then(() => self.skipWaiting()));
+  // cache: "reload" skips the browser's HTTP cache, so an update never
+  // installs stale copies of the files it's meant to replace.
+  e.waitUntil(caches.open(VERSION).then(c => c.addAll(SHELL.map(u => new Request(u, { cache: "reload" })))).then(() => self.skipWaiting()));
 });
 
 self.addEventListener("activate", e => {
@@ -25,6 +27,8 @@ self.addEventListener("fetch", e => {
   const url = new URL(req.url);
 
   // barcode lookups and the sync Worker must always be live
+  // the update check reads sw.js itself; never answer that from a cache
+  if (url.origin === self.location.origin && url.pathname.endsWith("/sw.js")) return;
   if (url.hostname.endsWith("openfoodfacts.org") || url.hostname.endsWith("workers.dev")) return;
 
   // fonts and the barcode library: cache-first, they never change
