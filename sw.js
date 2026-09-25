@@ -1,9 +1,9 @@
 /* Setpoint service worker — makes the app work offline after the first visit.
    Bump VERSION whenever you change any file so phones pick up the update. */
-const VERSION = "setpoint-2.1.0";
+const VERSION = "setpoint-2.4.0";
 const SHELL = [
   "./", "index.html", "manifest.webmanifest",
-  "css/app.css", "js/engine.js", "js/foods.js", "js/charts.js", "js/exercises.js", "js/train.js", "js/app.js",
+  "css/app.css", "js/engine.js", "js/foods.js", "js/charts.js", "js/exercises.js", "js/train.js", "js/sync.js", "js/app.js", "js/exlib-full.js",
   "icons/icon-192.png", "icons/icon-512.png", "icons/apple-touch-icon.png"
 ];
 
@@ -24,11 +24,11 @@ self.addEventListener("fetch", e => {
   if (req.method !== "GET") return;
   const url = new URL(req.url);
 
-  // barcode lookups must always be live
-  if (url.hostname.endsWith("openfoodfacts.org")) return;
+  // barcode lookups and the sync Worker must always be live
+  if (url.hostname.endsWith("openfoodfacts.org") || url.hostname.endsWith("workers.dev")) return;
 
   // fonts and the barcode library: cache-first, they never change
-  if (/fonts\.(googleapis|gstatic)\.com$/.test(url.hostname) || url.hostname === "cdn.jsdelivr.net") {
+  if (/fonts\.(googleapis|gstatic)\.com$/.test(url.hostname) || url.hostname === "cdn.jsdelivr.net" || url.hostname === "raw.githubusercontent.com") {
     e.respondWith(caches.open(VERSION).then(async c => {
       const hit = await c.match(req);
       if (hit) return hit;
